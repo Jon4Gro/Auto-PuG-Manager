@@ -161,8 +161,9 @@ uiElements.ofExpire = CreateEditBox(f, "APM_EB_OfExpire", 50, 20, 25, -705, "Que
 
 -- OPAQUE TOGGLE
 local cbOpaque = CreateFrame("CheckButton", "APM_CB_Opaque", f, "UICheckButtonTemplate")
-cbOpaque:SetPoint("BOTTOMRIGHT", -160, 20)
-_G["APM_CB_OpaqueText"]:SetText("Opaque UI Background")
+-- Shifted right to prevent overlapping with Start APM button
+cbOpaque:SetPoint("BOTTOMRIGHT", -120, 17)
+_G["APM_CB_OpaqueText"]:SetText("Black UI Background")
 uiElements.opaqueToggle = cbOpaque
 
 -- Functions

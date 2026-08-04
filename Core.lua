@@ -26,12 +26,14 @@ local defaultDB = {
 addon.isActive = false
 addon.spamPaused = false
 addon.overflowQueue = {}
-addon.roster = {} -- { ["PlayerName"] = { role = "T", F1 = true, level = 80 } }
+addon.roster = {} -- { ["cleanname"] = { displayName = "Name", role = "T", F1 = true, level = 80 } }
+addon.pendingInvites = {} -- { ["cleanname"] = { displayName = "Name", role = "T", F1 = true, time = GetTime() } }
 addon.unassignedQueueList = {}
 addon.unassignedQueueMap = {}
 
 local lastSpamTime = 0
 local timerAccumulator = 0
+local levelUpdateTimer = 0 -- New timer for 15s level polling
 
 local coreFrame = CreateFrame("Frame")
 coreFrame:RegisterEvent("ADDON_LOADED")
@@ -66,6 +68,12 @@ end
 -------------------------------------------------
 -- UTILITY & PARSING
 -------------------------------------------------
+local function GetCleanName(name)
+    if not name then return "" end
+    name = strsplit("-", name)
+    return string.lower(strtrim(name))
+end
+
 local function CheckKeywords(msg, kwString)
     local keywords = {strsplit(",", kwString)}
     for _, kw in ipairs(keywords) do
@@ -98,14 +106,22 @@ end
 
 function addon.GetCurrentRoleCounts()
     local counts = { T = 0, mD = 0, rD = 0, D = 0, H = 0, F1 = 0 }
-    for playerName, data in pairs(addon.roster) do
-        if counts[data.role] ~= nil then
-            counts[data.role] = counts[data.role] + 1
-        end
-        if data.F1 then
-            counts.F1 = counts.F1 + 1
+    local now = GetTime()
+
+    for _, data in pairs(addon.roster) do
+        if counts[data.role] ~= nil then counts[data.role] = counts[data.role] + 1 end
+        if data.F1 then counts.F1 = counts.F1 + 1 end
+    end
+
+    for cleanName, data in pairs(addon.pendingInvites) do
+        if (now - data.time) < 45 then
+            if counts[data.role] ~= nil then counts[data.role] = counts[data.role] + 1 end
+            if data.F1 then counts.F1 = counts.F1 + 1 end
+        else
+            addon.pendingInvites[cleanName] = nil
         end
     end
+
     return counts
 end
 
@@ -140,11 +156,12 @@ end
 function addon.ResetMyRole()
     local pName = UnitName("player")
     if pName then
-        pName = strsplit("-", pName) -- Strip cross-realm syntax just in case
-        addon.roster[pName] = nil
+        local clean = GetCleanName(pName)
+        addon.roster[clean] = nil
+        addon.pendingInvites[clean] = nil
         if addon.isActive then
-            addon.unassignedQueueMap[pName] = true
-            table.insert(addon.unassignedQueueList, pName)
+            addon.unassignedQueueMap[clean] = true
+            table.insert(addon.unassignedQueueList, clean)
             if not addon.assignFrame:IsShown() then
                 addon.ProcessUnassignedQueue()
             end
@@ -152,6 +169,36 @@ function addon.ResetMyRole()
         addon.UpdateTracker()
         print("|cff00ff00[APM] Your role has been reset. You will be prompted to reassign it.|r")
     end
+end
+
+-- Level Polling Function
+function addon.RefreshRosterLevels()
+    local updated = false
+    local numRaid = GetNumRaidMembers()
+    local numParty = GetNumPartyMembers()
+    
+    local function checkAndUpdate(unit)
+        local n = UnitName(unit)
+        if n then
+            local clean = GetCleanName(n)
+            local lvl = UnitLevel(unit)
+            if lvl and lvl > 0 and addon.roster[clean] and addon.roster[clean].level ~= lvl then
+                addon.roster[clean].level = lvl
+                updated = true
+            end
+        end
+    end
+
+    if numRaid > 0 then
+        for i = 1, numRaid do checkAndUpdate("raid"..i) end
+    elseif numParty > 0 then
+        for i = 1, numParty do checkAndUpdate("party"..i) end
+        checkAndUpdate("player")
+    else
+        checkAndUpdate("player")
+    end
+    
+    if updated then addon.UpdateTracker() end
 end
 
 -------------------------------------------------
@@ -171,7 +218,6 @@ tracker.text:SetPoint("CENTER", 0, 0)
 tracker.text:SetJustifyH("CENTER")
 
 function addon.UpdateTracker()
-    -- Tracker should only be visible if both setting is on AND APM is actively running
     if not APM_DB.tracker.show or not addon.isActive then tracker:Hide(); return end
     tracker:Show()
     addon.ApplyStyle(tracker)
@@ -181,7 +227,6 @@ function addon.UpdateTracker()
     local statsStr = {}
     local lines = {}
     
-    -- LINE 1: Stats
     if l.T and l.T > 0 then table.insert(statsStr, string.format("T: %d/%d", c.T, l.T)) end
     if l.H and l.H > 0 then table.insert(statsStr, string.format("H: %d/%d", c.H, l.H)) end
     if l.D and l.D > 0 then
@@ -195,23 +240,21 @@ function addon.UpdateTracker()
     end
     table.insert(lines, table.concat(statsStr, " - "))
     
-    -- LINE 2: F1 Names
     if APM_DB.tracker.showF1Names then
         local f1Names = {}
-        for name, data in pairs(addon.roster) do
-            if data.F1 then table.insert(f1Names, name) end
+        for _, data in pairs(addon.roster) do
+            if data.F1 then table.insert(f1Names, data.displayName or "Unknown") end
         end
         if #f1Names > 0 then
             table.insert(lines, "|cff00ff00" .. (APM_DB.tracker.f1Name or "Aura") .. "s:|r " .. table.concat(f1Names, ", "))
         end
     end
     
-    -- LINE 3: Level Conditions
     if APM_DB.tracker.showLevelNames and APM_DB.tracker.levelCond and APM_DB.tracker.levelCond ~= "" then
         local lvlNames = {}
-        for name, data in pairs(addon.roster) do
+        for _, data in pairs(addon.roster) do
             if data.level and addon.CheckLevel(data.level, APM_DB.tracker.levelCond) then
-                table.insert(lvlNames, name .. "(" .. data.level .. ")")
+                table.insert(lvlNames, (data.displayName or "Unknown") .. "(" .. data.level .. ")")
             end
         end
         if #lvlNames > 0 then
@@ -220,13 +263,10 @@ function addon.UpdateTracker()
     end
     
     tracker.text:SetText(table.concat(lines, "\n"))
-    
-    -- Dynamically resize height and width based on text block size
     tracker:SetHeight(math.max(tracker.text:GetStringHeight() + 15, 30))
     tracker:SetWidth(math.max(tracker.text:GetStringWidth() + 30, 50))
 end
 
--- Assignment Popup
 addon.assignFrame = CreateFrame("Frame", "APM_AssignPopup", UIParent)
 local assignF = addon.assignFrame
 assignF:SetSize(250, 160)
@@ -261,10 +301,10 @@ saveBtn:SetText("Save")
 saveBtn:SetScript("OnClick", function()
     local name = assignF.currentPlayer
     if name then
-        -- Preserve level if already fetched
-        local currentLvl = addon.roster[name] and addon.roster[name].level or 0
-        addon.roster[name] = { role = assignF.selectedRole, F1 = assignF.cbF1:GetChecked() and true or false, level = currentLvl }
-        addon.unassignedQueueMap[name] = nil
+        local clean = GetCleanName(name)
+        local currentLvl = addon.roster[clean] and addon.roster[clean].level or 0
+        addon.roster[clean] = { displayName = assignF.rawDisplayName or name, role = assignF.selectedRole, F1 = assignF.cbF1:GetChecked() and true or false, level = currentLvl }
+        addon.unassignedQueueMap[clean] = nil
         table.remove(addon.unassignedQueueList, 1)
     end
     addon.UpdateTracker()
@@ -278,16 +318,17 @@ function addon.ProcessUnassignedQueue()
     end
 
     if #addon.unassignedQueueList > 0 then
-        local name = addon.unassignedQueueList[1]
-        assignF.currentPlayer = name
-        assignF.title:SetText("Assign Role: " .. name)
+        local cleanName = addon.unassignedQueueList[1]
+        local dispName = addon.unassignedQueueMap[cleanName] and addon.unassignedQueueMap[cleanName].displayName or cleanName
+        assignF.currentPlayer = cleanName
+        assignF.rawDisplayName = dispName
+        assignF.title:SetText("Assign Role: " .. dispName)
         assignF.cbF1.text:SetText((APM_DB.tracker.f1Name or "Aura") .. " Active?")
         assignF.cbF1:SetChecked(false)
         addon.ApplyStyle(assignF)
         assignF:Show()
     else
         assignF:Hide()
-        -- Resume popup check after assignments
         if addon.spamPaused and not IsRaidFull() and addon.isActive then
             addon.ApplyStyle(addon.resumeFrame)
             addon.resumeFrame:Show()
@@ -295,7 +336,6 @@ function addon.ProcessUnassignedQueue()
     end
 end
 
--- Resume Auto-Spam Popup
 addon.resumeFrame = CreateFrame("Frame", "APM_ResumePopup", UIParent)
 local resumeF = addon.resumeFrame
 resumeF:SetSize(280, 100)
@@ -370,12 +410,19 @@ local function GetOrCreateRow(i)
         
         row.btn:SetScript("OnClick", function()
             if row.playerName then
+                local clean = GetCleanName(row.playerName)
                 SendChatMessage(APM_DB.invitePhrase, "WHISPER", nil, row.playerName)
                 InviteUnit(row.playerName)
-                addon.roster[row.playerName] = { role = row.assignedRole, F1 = row.hasF1, level = 0 }
+                
+                addon.pendingInvites[clean] = {
+                    displayName = row.playerName,
+                    role = row.assignedRole,
+                    F1 = row.hasF1,
+                    time = GetTime()
+                }
                 
                 for idx, entry in ipairs(addon.overflowQueue) do
-                    if entry.name == row.playerName then table.remove(addon.overflowQueue, idx); break end
+                    if GetCleanName(entry.name) == clean then table.remove(addon.overflowQueue, idx); break end
                 end
                 addon.UpdateOverflow()
                 addon.UpdateTracker()
@@ -423,7 +470,6 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
         if name == addonName then
             APM_DB = APM_DB or {}
             
-            -- Migrate intervalMins to intervalSecs
             if APM_DB.spam and APM_DB.spam.intervalMins then
                 APM_DB.spam.intervalSecs = APM_DB.spam.intervalMins * 60
                 APM_DB.spam.intervalMins = nil
@@ -447,7 +493,10 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "CHAT_MSG_WHISPER" then
         if not addon.isActive then return end
         local msg, sender = ...
-        sender = strsplit("-", sender)
+        local rawSender = strsplit("-", sender)
+        local cleanSender = GetCleanName(sender)
+        
+        if addon.roster[cleanSender] or addon.pendingInvites[cleanSender] then return end
         
         local roles, flags = ParseWhisper(msg)
         if #roles == 0 then return end
@@ -474,14 +523,19 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
         end
 
         if invited and not IsRaidFull() then
-            InviteUnit(sender)
-            addon.roster[sender] = { role = assignedRole, F1 = flags.F1 and true or false, level = 0 }
+            InviteUnit(rawSender)
+            addon.pendingInvites[cleanSender] = {
+                displayName = rawSender,
+                role = assignedRole,
+                F1 = flags.F1 and true or false,
+                time = GetTime()
+            }
             addon.UpdateTracker()
             if totalParty > 0 and totalRaid == 0 then ConvertToRaid() end
         else
             local exists = false
             for _, entry in ipairs(addon.overflowQueue) do
-                if entry.name == sender then
+                if GetCleanName(entry.name) == cleanSender then
                     entry.time = GetTime(); entry.roles = roles
                     local newFlags = {}
                     if flags.F1 then table.insert(newFlags, "F1") end
@@ -495,49 +549,70 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
                 local newFlags = {}
                 if flags.F1 then table.insert(newFlags, "F1") end
                 if flags.F2 then table.insert(newFlags, "F2") end
-                table.insert(addon.overflowQueue, { name = sender, time = GetTime(), roles = roles, flags = newFlags })
+                table.insert(addon.overflowQueue, { name = rawSender, time = GetTime(), roles = roles, flags = newFlags })
                 if APM_DB.autoResponse and APM_DB.autoResponse ~= "" then
-                    SendChatMessage(APM_DB.autoResponse, "WHISPER", nil, sender)
+                    SendChatMessage(APM_DB.autoResponse, "WHISPER", nil, rawSender)
                 end
             end
             addon.UpdateOverflow()
         end
 
     elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
-        local currentMembers = {}
+        local currentMembers = {} 
         local numRaid = GetNumRaidMembers()
         local numParty = GetNumPartyMembers()
         
         if numRaid > 0 then
             for i = 1, numRaid do
                 local n = UnitName("raid"..i)
-                if n then n = strsplit("-", n); currentMembers[n] = UnitLevel("raid"..i) or 0 end
+                if n then
+                    local clean = GetCleanName(n)
+                    currentMembers[clean] = { displayName = strsplit("-", n), level = UnitLevel("raid"..i) or 0 }
+                end
             end
         elseif numParty > 0 then
             for i = 1, numParty do
                 local n = UnitName("party"..i)
-                if n then n = strsplit("-", n); currentMembers[n] = UnitLevel("party"..i) or 0 end
+                if n then
+                    local clean = GetCleanName(n)
+                    currentMembers[clean] = { displayName = strsplit("-", n), level = UnitLevel("party"..i) or 0 }
+                end
             end
             local pName = UnitName("player")
-            if pName then pName = strsplit("-", pName); currentMembers[pName] = UnitLevel("player") or 0 end
+            if pName then
+                local clean = GetCleanName(pName)
+                currentMembers[clean] = { displayName = strsplit("-", pName), level = UnitLevel("player") or 0 }
+            end
         else
             local pName = UnitName("player")
-            if pName then pName = strsplit("-", pName); currentMembers[pName] = UnitLevel("player") or 0 end
+            if pName then
+                local clean = GetCleanName(pName)
+                currentMembers[clean] = { displayName = strsplit("-", pName), level = UnitLevel("player") or 0 }
+            end
         end
         
-        -- Remove leavers
-        for name in pairs(addon.roster) do
-            if not currentMembers[name] then addon.roster[name] = nil end
+        for cleanName, data in pairs(addon.pendingInvites) do
+            if currentMembers[cleanName] then
+                addon.roster[cleanName] = {
+                    displayName = data.displayName or currentMembers[cleanName].displayName,
+                    role = data.role,
+                    F1 = data.F1,
+                    level = currentMembers[cleanName].level
+                }
+                addon.pendingInvites[cleanName] = nil
+            end
         end
         
-        -- Handle levels and Queues
-        for name, lvl in pairs(currentMembers) do
-            if addon.roster[name] then
-                -- Update level if we now have it
-                addon.roster[name].level = lvl
-            elseif addon.isActive and not addon.unassignedQueueMap[name] then
-                table.insert(addon.unassignedQueueList, name)
-                addon.unassignedQueueMap[name] = true
+        for cleanName in pairs(addon.roster) do
+            if not currentMembers[cleanName] then addon.roster[cleanName] = nil end
+        end
+        
+        for cleanName, info in pairs(currentMembers) do
+            if addon.roster[cleanName] then
+                addon.roster[cleanName].level = info.level
+            elseif addon.isActive and not addon.pendingInvites[cleanName] and not addon.unassignedQueueMap[cleanName] then
+                table.insert(addon.unassignedQueueList, cleanName)
+                addon.unassignedQueueMap[cleanName] = { displayName = info.displayName }
             end
         end
         
@@ -561,18 +636,22 @@ end)
 coreFrame:SetScript("OnUpdate", function(self, elapsed)
     if not addon.isActive then return end
     
+    levelUpdateTimer = levelUpdateTimer + elapsed
+    if levelUpdateTimer >= 15.0 then
+        levelUpdateTimer = 0
+        addon.RefreshRosterLevels()
+    end
+    
     timerAccumulator = timerAccumulator + elapsed
     if timerAccumulator >= 1.0 then
         timerAccumulator = 0
         local now = GetTime()
         
-        -- Auto Pause Check
         if IsRaidFull() and not addon.spamPaused then
             addon.spamPaused = true
             print("|cff00ff00[APM] Limits reached! Auto-spam paused. Continuing to queue whispers.|r")
         end
         
-        -- Overflow Cleanup
         local expireSecs = APM_DB.overflowExpireMins * 60
         local cleaned = false
         for i = #addon.overflowQueue, 1, -1 do
@@ -582,12 +661,10 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
         end
         if cleaned then addon.UpdateOverflow() end
 
-        -- Chat Spam (Only if not paused and interval > 0)
         local intervalSecs = APM_DB.spam.intervalSecs or 0
         if intervalSecs > 0 and (now - lastSpamTime) >= intervalSecs and not addon.spamPaused then
             lastSpamTime = now
             
-            -- Dynamic %STATS% replacement
             local spamMsg = APM_DB.spam.text
             if string.find(spamMsg, "%%STATS%%") then
                 local c = addon.GetCurrentRoleCounts()
