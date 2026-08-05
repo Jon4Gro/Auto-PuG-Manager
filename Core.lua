@@ -20,7 +20,8 @@ local defaultDB = {
     spam = { text = "LFM Raid! %STATS% whisper role, looms, aura.", channel = "world", intervalSecs = 300 },
     overflowExpireMins = 5,
     invitePhrase = "Inviting you now, please have your Aura active!",
-    autoResponse = "Role full or missing requirements, you have been added to the queue!"
+    autoResponse = "Role full or missing requirements, you have been added to the queue!",
+    minimap = { hide = false, angle = 45 }
 }
 
 addon.isActive = false
@@ -33,13 +34,91 @@ addon.unassignedQueueMap = {}
 
 local lastSpamTime = 0
 local timerAccumulator = 0
-local levelUpdateTimer = 0 -- New timer for 15s level polling
+local levelUpdateTimer = 0 -- Timer for 5s level polling
 
 local coreFrame = CreateFrame("Frame")
 coreFrame:RegisterEvent("ADDON_LOADED")
 coreFrame:RegisterEvent("CHAT_MSG_WHISPER")
 coreFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
 coreFrame:RegisterEvent("RAID_ROSTER_UPDATE")
+
+-------------------------------------------------
+-- MINIMAP BUTTON
+-------------------------------------------------
+local minimapBtn = CreateFrame("Button", "APM_MinimapButton", Minimap)
+minimapBtn:SetSize(31, 31)
+minimapBtn:SetFrameStrata("MEDIUM")
+minimapBtn:SetFrameLevel(8)
+
+local icon = minimapBtn:CreateTexture(nil, "BACKGROUND")
+icon:SetTexture("Interface\\Icons\\INV_Misc_GroupNeedMore")
+icon:SetSize(21, 21)
+icon:SetPoint("CENTER", minimapBtn, "CENTER", -1, 1)
+
+local border = minimapBtn:CreateTexture(nil, "OVERLAY")
+border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+border:SetSize(54, 54)
+border:SetPoint("TOPLEFT", minimapBtn, "TOPLEFT", -11, 11)
+
+minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+minimapBtn:RegisterForDrag("LeftButton")
+minimapBtn:SetScript("OnDragStart", function(self)
+    self:SetScript("OnUpdate", function(self)
+        local mx, my = Minimap:GetCenter()
+        local px, py = GetCursorPosition()
+        local scale = Minimap:GetEffectiveScale()
+        px, py = px / scale, py / scale
+        local angle = math.deg(math.atan2(py - my, px - mx))
+        APM_DB.minimap.angle = angle
+        addon.UpdateMinimapButton()
+    end)
+end)
+minimapBtn:SetScript("OnDragStop", function(self)
+    self:SetScript("OnUpdate", nil)
+end)
+
+minimapBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:SetText("Auto PuG Manager")
+    GameTooltip:AddLine("Left-Click to open options.", 1, 1, 1)
+    GameTooltip:AddLine("Right-Click to Start/Stop APM.", 1, 1, 1)
+    GameTooltip:AddLine("Drag to move.", 1, 1, 1)
+    GameTooltip:Show()
+end)
+minimapBtn:SetScript("OnLeave", function(self)
+    GameTooltip:Hide()
+end)
+
+minimapBtn:SetScript("OnClick", function(self, button)
+    if button == "LeftButton" then
+        if addon.MainUI then
+            if addon.MainUI:IsShown() then
+                addon.MainUI:Hide()
+            else
+                addon.ApplyStyle(addon.MainUI)
+                addon.MainUI:Show()
+            end
+        end
+    elseif button == "RightButton" then
+        if addon.ToggleAPM then addon.ToggleAPM() end
+    end
+end)
+
+function addon.UpdateMinimapButton()
+    if not APM_DB.minimap then APM_DB.minimap = { hide = false, angle = 45 } end
+    if APM_DB.minimap.hide then
+        minimapBtn:Hide()
+    else
+        minimapBtn:Show()
+        local angle = math.rad(APM_DB.minimap.angle or 45)
+        local radius = 80
+        local x = math.cos(angle) * radius
+        local y = math.sin(angle) * radius
+        minimapBtn:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    end
+end
+
 
 -------------------------------------------------
 -- STYLING ENGINE
@@ -74,6 +153,27 @@ local function GetCleanName(name)
     return string.lower(strtrim(name))
 end
 
+-- SMARTER PARSING: Strip Negations
+local function StripNegations(msg, kwString)
+    if not kwString or kwString == "" then return msg end
+    local keywords = {strsplit(",", kwString)}
+    local negations = {"no", "without", "w/o", "w/out", "not", "dont have", "don't have", "0", "zero", "lack", "lacking"}
+    local tempMsg = " " .. msg .. " "
+    
+    for _, kw in ipairs(keywords) do
+        kw = string.lower(strtrim(kw))
+        if kw ~= "" then
+            local safeKw = string.gsub(kw, "[%(%)%.%%%+%-%*%?%[%^%$]", "%%%1")
+            for _, neg in ipairs(negations) do
+                local safeNeg = string.gsub(neg, "[%(%)%.%%%+%-%*%?%[%^%$]", "%%%1")
+                local pattern = "%f[%w]" .. safeNeg .. "%f[%W][%s%p]*" .. safeKw .. "%f[%W]"
+                tempMsg = string.gsub(tempMsg, pattern, " ")
+            end
+        end
+    end
+    return tempMsg
+end
+
 local function CheckKeywords(msg, kwString)
     local keywords = {strsplit(",", kwString)}
     for _, kw in ipairs(keywords) do
@@ -83,23 +183,28 @@ local function CheckKeywords(msg, kwString)
     return false
 end
 
+local function CheckSmartKeywords(msg, kwString)
+    local strippedMsg = StripNegations(msg, kwString)
+    return CheckKeywords(strippedMsg, kwString)
+end
+
 local function ParseWhisper(msg)
     msg = string.lower(msg)
     local roles = {}
     local flags = {}
 
     if APM_DB.limits.D and APM_DB.limits.D > 0 then
-        if CheckKeywords(msg, APM_DB.keywords.D) then table.insert(roles, "D") end
+        if CheckSmartKeywords(msg, APM_DB.keywords.D) then table.insert(roles, "D") end
     else
-        if CheckKeywords(msg, APM_DB.keywords.mD) then table.insert(roles, "mD") end
-        if CheckKeywords(msg, APM_DB.keywords.rD) then table.insert(roles, "rD") end
+        if CheckSmartKeywords(msg, APM_DB.keywords.mD) then table.insert(roles, "mD") end
+        if CheckSmartKeywords(msg, APM_DB.keywords.rD) then table.insert(roles, "rD") end
     end
     
-    if CheckKeywords(msg, APM_DB.keywords.T) then table.insert(roles, "T") end
-    if CheckKeywords(msg, APM_DB.keywords.H) then table.insert(roles, "H") end
+    if CheckSmartKeywords(msg, APM_DB.keywords.T) then table.insert(roles, "T") end
+    if CheckSmartKeywords(msg, APM_DB.keywords.H) then table.insert(roles, "H") end
     
-    if CheckKeywords(msg, APM_DB.keywords.F1) then flags.F1 = true; table.insert(flags, "F1") end
-    if CheckKeywords(msg, APM_DB.keywords.F2) then flags.F2 = true; table.insert(flags, "F2") end
+    if CheckSmartKeywords(msg, APM_DB.keywords.F1) then flags.F1 = true; table.insert(flags, "F1") end
+    if CheckSmartKeywords(msg, APM_DB.keywords.F2) then flags.F2 = true; table.insert(flags, "F2") end
 
     return roles, flags
 end
@@ -171,7 +276,6 @@ function addon.ResetMyRole()
     end
 end
 
--- Level Polling Function
 function addon.RefreshRosterLevels()
     local updated = false
     local numRaid = GetNumRaidMembers()
@@ -470,11 +574,6 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
         if name == addonName then
             APM_DB = APM_DB or {}
             
-            if APM_DB.spam and APM_DB.spam.intervalMins then
-                APM_DB.spam.intervalSecs = APM_DB.spam.intervalMins * 60
-                APM_DB.spam.intervalMins = nil
-            end
-            
             for k, v in pairs(defaultDB) do
                 if type(v) == "table" then
                     APM_DB[k] = APM_DB[k] or {}
@@ -486,6 +585,7 @@ coreFrame:SetScript("OnEvent", function(self, event, ...)
                 end
             end
             
+            addon.UpdateMinimapButton()
             addon.UpdateTracker()
             print("|cff00ff00Auto PuG Manager loaded. Type /apm to open options.|r")
         end
@@ -637,7 +737,7 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
     if not addon.isActive then return end
     
     levelUpdateTimer = levelUpdateTimer + elapsed
-    if levelUpdateTimer >= 15.0 then
+    if levelUpdateTimer >= 5.0 then
         levelUpdateTimer = 0
         addon.RefreshRosterLevels()
     end
@@ -701,14 +801,53 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
     end
 end)
 
-SLASH_APM1 = "/apm"
-SlashCmdList["APM"] = function()
-    if addon.MainUI then
-        if addon.MainUI:IsShown() then
-            addon.MainUI:Hide()
-        else
-            addon.ApplyStyle(addon.MainUI)
-            addon.MainUI:Show()
+-------------------------------------------------
+-- SLASH COMMANDS
+-------------------------------------------------
+function addon.PrintRole(roleCode, roleName)
+    local players = {}
+    for cleanName, data in pairs(addon.roster) do
+        if data.role == roleCode or (roleCode == "D" and (data.role == "mD" or data.role == "rD" or data.role == "D")) then
+            table.insert(players, data.displayName or cleanName)
         end
+    end
+    if #players == 0 then
+        print("|cff00ff00[APM]|r No " .. roleName .. " in roster.")
+    else
+        print("|cff00ff00[APM]|r " .. roleName .. " ("..#players.."): " .. table.concat(players, ", "))
+    end
+end
+
+SLASH_APM1 = "/apm"
+SlashCmdList["APM"] = function(msg)
+    msg = string.lower(strtrim(msg))
+    if msg == "" then
+        if addon.MainUI then
+            if addon.MainUI:IsShown() then
+                addon.MainUI:Hide()
+            else
+                addon.ApplyStyle(addon.MainUI)
+                addon.MainUI:Show()
+            end
+        end
+    elseif msg == "button" then
+        APM_DB.minimap.hide = not APM_DB.minimap.hide
+        addon.UpdateMinimapButton()
+        print("|cff00ff00[APM]|r Minimap button " .. (APM_DB.minimap.hide and "hidden." or "shown."))
+    elseif msg == "t" or msg == "tank" or msg == "tanks" then
+        addon.PrintRole("T", "Tanks")
+    elseif msg == "h" or msg == "heal" or msg == "healer" or msg == "healers" then
+        addon.PrintRole("H", "Healers")
+    elseif msg == "md" or msg == "mdps" or msg == "melee" then
+        addon.PrintRole("mD", "Melee DPS")
+    elseif msg == "rd" or msg == "rdps" or msg == "ranged" then
+        addon.PrintRole("rD", "Ranged DPS")
+    elseif msg == "d" or msg == "dps" then
+        addon.PrintRole("D", "Any DPS")
+    else
+        print("|cff00ff00[APM] Commands:|r")
+        print("  /apm - Toggle Options UI")
+        print("  /apm button - Toggle Minimap Button")
+        print("  /apm <tank, heal, mdps, rdps, dps> - List roster by role")
     end
 end

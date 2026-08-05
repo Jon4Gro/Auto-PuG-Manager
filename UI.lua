@@ -161,8 +161,7 @@ uiElements.ofExpire = CreateEditBox(f, "APM_EB_OfExpire", 50, 20, 25, -705, "Que
 
 -- OPAQUE TOGGLE
 local cbOpaque = CreateFrame("CheckButton", "APM_CB_Opaque", f, "UICheckButtonTemplate")
--- Shifted right to prevent overlapping with Start APM button
-cbOpaque:SetPoint("BOTTOMRIGHT", -120, 17)
+cbOpaque:SetPoint("BOTTOMRIGHT", -145, 20)
 _G["APM_CB_OpaqueText"]:SetText("Black UI Background")
 uiElements.opaqueToggle = cbOpaque
 
@@ -286,7 +285,7 @@ end
 
 f:SetScript("OnShow", LoadToUI)
 
-toggleBtn:SetScript("OnClick", function()
+addon.ToggleAPM = function()
     addon.isActive = not addon.isActive
     if addon.isActive then
         toggleBtn:SetText("Stop APM")
@@ -304,7 +303,8 @@ toggleBtn:SetScript("OnClick", function()
         addon.unassignedQueueMap = {}
         addon.UpdateTracker()
     end
-end)
+end
+toggleBtn:SetScript("OnClick", addon.ToggleAPM)
 
 resetRoleBtn:SetScript("OnClick", function()
     addon.ResetMyRole()

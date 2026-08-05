@@ -2,7 +2,7 @@
 ## Title: Auto PuG Manager
 ## Notes: Auto-invite, chat spam, tracker, and overflow queue system.
 ## SavedVariables: APM_DB
-## Version: 2.8
+## Version: 2.9
 
 Core.lua
 UI.lua
